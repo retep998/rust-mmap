@@ -12,4 +12,6 @@ A library for dealing with memory-mapped I/O
 
 [dependencies]
 libc = "0.1.6"
+
+[dev-dependencies]
 tempdir = "0.3"

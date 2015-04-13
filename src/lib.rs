@@ -277,14 +277,15 @@ impl Drop for MemoryMap {
 #[cfg(windows)]
 impl MemoryMap {
     /// Create a new mapping with the given `options`, at least `min_len` bytes long.
+    #[allow(non_snake_case)]
     pub fn new(min_len: usize, options: &[MapOption]) -> Result<MemoryMap, MapError> {
-        use libc::types::os::arch::extra::{LPVOID, DWORD, SIZE_T, HANDLE};
+        use libc::types::os::arch::extra::{LPVOID, DWORD, SIZE_T};
 
         let mut lpAddress: LPVOID = ptr::null_mut();
         let mut readable = false;
         let mut writable = false;
         let mut executable = false;
-        let mut handle: HANDLE = libc::INVALID_HANDLE_VALUE;
+        let mut handle = None;
         let mut offset: usize = 0;
         let len = round_up(min_len, page_size());
 
@@ -294,41 +295,23 @@ impl MemoryMap {
                 MapWritable => { writable = true; },
                 MapExecutable => { executable = true; }
                 MapAddr(addr_) => { lpAddress = addr_ as LPVOID; },
-                MapFd(handle_) => { handle = handle_; },
+                MapFd(handle_) => { handle = Some(handle_); },
                 MapOffset(offset_) => { offset = offset_; },
                 MapNonStandardFlags(..) => {}
             }
         }
 
         let flProtect = match (executable, readable, writable) {
-            (false, false, false) if handle == libc::INVALID_HANDLE_VALUE => libc::PAGE_NOACCESS,
+            (false, false, false) if handle.is_none() => libc::PAGE_NOACCESS,
             (false, true, false) => libc::PAGE_READONLY,
             (false, true, true) => libc::PAGE_READWRITE,
-            (true, false, false) if handle == libc::INVALID_HANDLE_VALUE => libc::PAGE_EXECUTE,
+            (true, false, false) if handle.is_none() => libc::PAGE_EXECUTE,
             (true, true, false) => libc::PAGE_EXECUTE_READ,
             (true, true, true) => libc::PAGE_EXECUTE_READWRITE,
             _ => return Err(ErrUnsupProt)
         };
 
-        if handle == libc::INVALID_HANDLE_VALUE {
-            if offset != 0 {
-                return Err(ErrUnsupOffset);
-            }
-            let r = unsafe {
-                libc::VirtualAlloc(lpAddress,
-                                   len as SIZE_T,
-                                   libc::MEM_COMMIT | libc::MEM_RESERVE,
-                                   flProtect)
-            };
-            match r as usize {
-                0 => Err(ErrVirtualAlloc()),
-                _ => Ok(MemoryMap {
-                   data: r as *mut u8,
-                   len: len,
-                   kind: MapVirtual
-                })
-            }
-        } else {
+        if let Some(handle) = handle {
             let dwDesiredAccess = match (executable, readable, writable) {
                 (false, true, false) => libc::FILE_MAP_READ,
                 (false, true, true) => libc::FILE_MAP_WRITE,
@@ -365,13 +348,31 @@ impl MemoryMap {
                     })
                 }
             }
+        } else {
+            if offset != 0 {
+                return Err(ErrUnsupOffset);
+            }
+            let r = unsafe {
+                libc::VirtualAlloc(lpAddress,
+                                   len as SIZE_T,
+                                   libc::MEM_COMMIT | libc::MEM_RESERVE,
+                                   flProtect)
+            };
+            match r as usize {
+                0 => Err(ErrVirtualAlloc(errno())),
+                _ => Ok(MemoryMap {
+                   data: r as *mut u8,
+                   len: len,
+                   kind: MapVirtual
+                })
+            }
         }
     }
 
     /// Granularity of MapAddr() and MapOffset() parameter values.
     /// This may be greater than the value returned by page_size().
     pub fn granularity() -> usize {
-        use mem;
+        use std::mem;
         unsafe {
             let mut info = mem::zeroed();
             libc::GetSystemInfo(&mut info);
@@ -454,16 +455,15 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
 
         #[cfg(unix)]
-        use std::os::unix::io::AsRawFd;
-
-        #[cfg(unix)]
         fn get_fd(file: &fs::File) -> libc::c_int {
+            use std::os::unix::io::AsRawFd;
             file.as_raw_fd()
         }
 
         #[cfg(windows)]
         fn get_fd(file: &fs::File) -> libc::HANDLE {
-            file.as_raw_handle()
+            use std::os::windows::io::AsRawHandle;
+            file.as_raw_handle() as libc::HANDLE
         }
 
         let tmpdir = tempdir::TempDir::new("").unwrap();
